@@ -2,6 +2,8 @@
 
 基於 Pygame 的迷你高爾夫遊戲，最終目標是整合穿戴式 EEG 感測裝置，透過 **眨眼**、**專注**、**放鬆** 三種腦波狀態操控遊戲。目前以滑鼠點擊與空白鍵模擬 EEG 輸入。
 
+[![demo](https://img.youtube.com/vi/mGCUsP0w5WU/0.jpg)](https://www.youtube.com/watch?v=mGCUsP0w5WU)
+
 ## 操作方式
 
 | 步驟 | 操作 | 模擬的 EEG 狀態 |
