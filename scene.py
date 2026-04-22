@@ -45,7 +45,7 @@ class Scene:
         self.add_cell(col, row, cell)
 
     def random_on_rect(self, i1, j1, i2, j2, cell, n):
-        for i in range(n):
+        for _ in range(n):
             random_i = random.randint(i1, i2)
             random_j = random.randint(j1, j2)
             self.single(random_i, random_j, cell)
