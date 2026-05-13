@@ -66,9 +66,20 @@ class Cart(Rigidbody):
     def move_cart(self, t, constant=False):
         self.move(t, constant)
 
-        current_pos = self.pos[0] if not self.move_vertical else self.pos[1]
-        if current_pos < self.a or current_pos > self.b:
-            self.vel *= -1
+        if not self.move_vertical:
+            if self.pos[0] < self.a:
+                self.pos[0] = self.a
+                self.vel *= -1
+            elif self.pos[0] > self.b:
+                self.pos[0] = self.b
+                self.vel *= -1
+        else:
+            if self.pos[1] < self.a:
+                self.pos[1] = self.a
+                self.vel *= -1
+            elif self.pos[1] > self.b:
+                self.pos[1] = self.b
+                self.vel *= -1
 
     def blit(self, screen):
         screen.blit(self.image, self.pos)
