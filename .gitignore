@@ -1,3 +1,5 @@
 .idea/
 .venv/
 __pycache__/
+bci_dataset_114-2_any/
+*.pkl

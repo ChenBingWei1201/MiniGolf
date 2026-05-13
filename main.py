@@ -1,4 +1,5 @@
 import math
+import sys
 from game_manager import GameManager
 import physics
 import pygame
@@ -7,6 +8,22 @@ from game_objects import Ball, Hole
 from shapes import Line
 import config
 from transformation import pixels_2_indexes
+from eeg_input import EEGInput, GameState as EEGGameState
+
+
+# ============================================================
+# EEG 連線設定
+# ============================================================
+# 從命令列取得 COM port，例如：python main.py --port COM3
+com_port = "COM3"  # 預設值
+if "--port" in sys.argv:
+    port_idx = sys.argv.index("--port") + 1
+    if port_idx < len(sys.argv):
+        com_port = sys.argv[port_idx]
+
+print(f"[EEG] Initializing EEG on {com_port}...")
+eeg_input = EEGInput(com_port=com_port)
+print("[EEG] Ready! Control with your brain.")
 
 
 pygame.init()
@@ -21,14 +38,13 @@ game_manager = GameManager()
 ball = Ball(game_manager.current_level.start_point, config.ball_radius)
 hole = Hole(game_manager.current_level.end_point, config.ball_radius + 5)
 
-# === EEG 模擬操作狀態 ===
+# === 瞄準 / 蓄力狀態 ===
 aim_angle = 0.0             # 當前瞄準角度（弧度），持續旋轉
-aim_locked = False           # 方向是否已被鎖定（模擬眨眼確認）
-charging = False             # 是否正在蓄力（模擬專注狀態）
+aim_locked = False           # 方向是否已被鎖定（眨眼確認）
+charging = False             # 是否正在蓄力（專注狀態）
 charge_power = 0.0           # 當前蓄力比例 (0.0 ~ 1.0)
 
 AIM_SPEED = 1.5              # 方向指示線旋轉速度（弧度/秒）
-CHARGE_SPEED = 0.8           # 蓄力速度（每秒增加的比例）
 MAX_FORCE = 800.0            # 最大力道
 MIN_ARROW_LEN = 35.0         # 箭頭最短長度（預設短箭頭）
 MAX_ARROW_LEN = 160.0        # 箭頭最長長度（蓄滿時）
@@ -40,6 +56,7 @@ def reset_aim_state():
     aim_locked = False
     charging = False
     charge_power = 0.0
+    eeg_input.reset_round()
 
 
 def draw_arrow(surface, color, start, end, head_size=10, width=2):
@@ -57,12 +74,62 @@ def draw_arrow(surface, color, start, end, head_size=10, width=2):
     pygame.draw.polygon(surface, color, [(end[0], end[1]), (left_x, left_y), (right_x, right_y)])
 
 
+def draw_eeg_status(surface):
+    """在畫面左上角顯示 EEG 即時狀態資訊"""
+    font = pygame.font.SysFont('Comic Sans MS', 16)
+    y_offset = 50
+
+    # 連線狀態
+    connected = eeg_input.is_connected()
+    conn_color = (0, 200, 0) if connected else (200, 0, 0)
+    conn_text = "EEG: Connected" if connected else "EEG: Waiting..."
+    text_surf = font.render(conn_text, True, conn_color)
+    surface.blit(text_surf, (10, y_offset))
+
+    # 目前狀態
+    state = eeg_input.state_manager.current_state
+    state_names = {0: "AIMING", 1: "CHARGING", 2: "FLYING"}
+    state_colors = {0: (100, 100, 255), 1: (255, 165, 0), 2: (0, 200, 0)}
+    state_name = state_names.get(int(state), "UNKNOWN")
+    state_text = font.render(f"State: {state_name}", True,
+                             state_colors.get(int(state), (255, 255, 255)))
+    surface.blit(state_text, (10, y_offset + 22))
+
+    # 蓄力值
+    power = eeg_input.state_manager.power
+    power_text = font.render(f"Power: {power:.1f} / {eeg_input.state_manager.max_power:.0f}",
+                             True, (255, 255, 255))
+    surface.blit(power_text, (10, y_offset + 44))
+
+    # 預測次數
+    pred_count = eeg_input.reader.get_prediction_count()
+    pred_text = font.render(f"Predictions: {pred_count}", True, (180, 180, 180))
+    surface.blit(pred_text, (10, y_offset + 66))
+
+    # 最新預測
+    pred_val = eeg_input.reader.get_latest_prediction()
+    pred_labels = {0: "Relax", 1: "Focus", 2: "Blink"}
+    pred_label_colors = {0: (100, 200, 100), 1: (255, 200, 50), 2: (255, 100, 100)}
+    label = pred_labels.get(pred_val, "?")
+    label_text = font.render(f"Brain: {label}", True,
+                             pred_label_colors.get(pred_val, (255, 255, 255)))
+    surface.blit(label_text, (10, y_offset + 88))
+
+
 if __name__ == "__main__":
+    print("=" * 50)
+    print("  EEG Mini Golf - Brain Control Mode")
+    print("  Blink  → lock direction")
+    print("  Focus  → charge power")
+    print("  Relax  → swing!")
+    print("=" * 50)
+
     while not game_start:
         screen.fill((255, 255, 255))
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                eeg_input.close()
                 pygame.quit()
                 exit(0)
             if event.type == pygame.MOUSEBUTTONDOWN:
@@ -73,6 +140,13 @@ if __name__ == "__main__":
                     game_start = True
 
         game_manager.blit_start(screen)
+
+        # 在開始畫面顯示模式
+        mode_font = pygame.font.SysFont('Comic Sans MS', 18)
+        mode_text = mode_font.render("Mode: EEG Brain Control", True, (100, 100, 100))
+        screen.blit(mode_text, (config.screen_size[0] // 2 - 100,
+                                config.screen_size[1] // 2 + 30))
+
         pygame.display.flip()
 
     game_manager.current_level.init()
@@ -84,37 +158,39 @@ if __name__ == "__main__":
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                eeg_input.close()
                 pygame.quit()
                 exit(0)
 
-            # --- 滑鼠點擊：鎖定方向（模擬眨眼） ---
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if ball.not_moving() and not aim_locked and not charging:
-                    aim_locked = True
+        # ==============================================
+        # EEG 輸入處理
+        # ==============================================
+        if ball.not_moving():
+            state, power_ratio, trigger_swing = eeg_input.update()
 
-            # --- 空白鍵按下：開始蓄力（模擬進入專注狀態） ---
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
-                    if ball.not_moving() and aim_locked and not charging:
-                        charging = True
-                        charge_power = 0.0
+            if state == EEGGameState.AIMING:
+                # 瞄準中：箭頭持續旋轉
+                aim_locked = False
+                charging = False
+                charge_power = 0.0
 
-            # --- 空白鍵放開：揮桿（模擬從專注轉為放鬆） ---
-            if event.type == pygame.KEYUP:
-                if event.key == pygame.K_SPACE:
-                    if charging:
-                        direction = Vector2(math.cos(aim_angle), math.sin(aim_angle))
-                        force = direction * (charge_power * MAX_FORCE)
-                        ball.apply_force(force)
-                        game_manager.throw_number += 1
-                        reset_aim_state()
+            elif state == EEGGameState.CHARGING:
+                # 蓄力中：方向已鎖定，力道跟隨 EEG 專注程度
+                aim_locked = True
+                charging = True
+                charge_power = power_ratio  # 0.0 ~ 1.0
 
-        # --- 每幀更新：方向旋轉 & 蓄力增長 ---
+            if trigger_swing:
+                # 偵測到放鬆 → 觸發揮桿！
+                direction = Vector2(math.cos(aim_angle), math.sin(aim_angle))
+                force = direction * (charge_power * MAX_FORCE)
+                ball.apply_force(force)
+                game_manager.throw_number += 1
+                reset_aim_state()
+
+        # --- 每幀更新：方向旋轉 ---
         if ball.not_moving() and not aim_locked:
             aim_angle += AIM_SPEED * dt  # 方向持續旋轉
-
-        if charging:
-            charge_power = min(charge_power + CHARGE_SPEED * dt, 1.0)
 
         # --- 物理更新 ---
         ball.move(dt * 10)  # 乘以 10 還原原始時間尺度 (原本 tick/100)
@@ -152,13 +228,16 @@ if __name__ == "__main__":
                 end_point = ball.pos + direction * arrow_len
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
             elif aim_locked:
-                # 方向已鎖定，等待按空白鍵：顯示紅色短箭頭
+                # 方向已鎖定，等待蓄力
                 end_point = ball.pos + direction * MIN_ARROW_LEN
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
             else:
-                # 方向旋轉中：顯示紅色短箭頭
+                # 方向旋轉中
                 end_point = ball.pos + direction * MIN_ARROW_LEN
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
+
+        # --- 繪製 EEG 狀態資訊 ---
+        draw_eeg_status(screen)
 
         pygame.display.flip()
 
@@ -196,5 +275,6 @@ if __name__ == "__main__":
 
         pygame.display.flip()
 
+    eeg_input.close()
     pygame.quit()
     exit(0)
