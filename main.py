@@ -14,21 +14,29 @@ from eeg_input import EEGInput, GameState as EEGGameState
 # ============================================================
 # EEG 連線設定
 # ============================================================
-# 從命令列取得 COM port，例如：python main.py --port COM3
 com_port = "COM3"  # 預設值
 if "--port" in sys.argv:
     port_idx = sys.argv.index("--port") + 1
     if port_idx < len(sys.argv):
         com_port = sys.argv[port_idx]
 
-print(f"[EEG] Initializing EEG on {com_port}...")
-eeg_input = EEGInput(com_port=com_port)
-print("[EEG] Ready! Control with your brain.")
-
 
 pygame.init()
 screen = pygame.display.set_mode(config.screen_size)
 clock = pygame.time.Clock()
+
+# 顯示載入畫面
+screen.fill((255, 255, 255))
+loading_font = pygame.font.SysFont('Comic Sans MS', 30)
+loading_text = loading_font.render("Loading EEG model...", True, (100, 100, 100))
+screen.blit(loading_text, (config.screen_size[0] // 2 - 130,
+                           config.screen_size[1] // 2 - 20))
+pygame.display.flip()
+
+# 載入模型 + 初始化 EEG（但還不開始讀取 Serial）
+print(f"[EEG] Initializing EEG on {com_port}...")
+eeg_input = EEGInput(com_port=com_port)
+print("[EEG] Model loaded. Waiting for game start...")
 
 game_end = False
 game_start = False
@@ -81,10 +89,23 @@ def draw_eeg_status(surface):
 
     # 連線狀態
     connected = eeg_input.is_connected()
-    conn_color = (0, 200, 0) if connected else (200, 0, 0)
-    conn_text = "EEG: Connected" if connected else "EEG: Waiting..."
+    thread_ok = eeg_input.reader.is_alive_and_running()
+    if connected and thread_ok:
+        conn_color = (0, 200, 0)
+        conn_text = "EEG: Connected"
+    elif connected and not thread_ok:
+        conn_color = (255, 165, 0)
+        conn_text = "EEG: Thread stopped!"
+    else:
+        conn_color = (200, 0, 0)
+        conn_text = "EEG: Waiting..."
     text_surf = font.render(conn_text, True, conn_color)
     surface.blit(text_surf, (10, y_offset))
+
+    # Buffer 填充度
+    fill = eeg_input.reader.get_buffer_fill()
+    fill_text = font.render(f"Buffer: {fill*100:.0f}%", True, (180, 180, 180))
+    surface.blit(fill_text, (10, y_offset + 22))
 
     # 目前狀態
     state = eeg_input.state_manager.current_state
@@ -93,18 +114,18 @@ def draw_eeg_status(surface):
     state_name = state_names.get(int(state), "UNKNOWN")
     state_text = font.render(f"State: {state_name}", True,
                              state_colors.get(int(state), (255, 255, 255)))
-    surface.blit(state_text, (10, y_offset + 22))
+    surface.blit(state_text, (10, y_offset + 44))
 
     # 蓄力值
     power = eeg_input.state_manager.power
     power_text = font.render(f"Power: {power:.1f} / {eeg_input.state_manager.max_power:.0f}",
                              True, (255, 255, 255))
-    surface.blit(power_text, (10, y_offset + 44))
+    surface.blit(power_text, (10, y_offset + 66))
 
     # 預測次數
     pred_count = eeg_input.reader.get_prediction_count()
     pred_text = font.render(f"Predictions: {pred_count}", True, (180, 180, 180))
-    surface.blit(pred_text, (10, y_offset + 66))
+    surface.blit(pred_text, (10, y_offset + 88))
 
     # 最新預測
     pred_val = eeg_input.reader.get_latest_prediction()
@@ -113,7 +134,13 @@ def draw_eeg_status(surface):
     label = pred_labels.get(pred_val, "?")
     label_text = font.render(f"Brain: {label}", True,
                              pred_label_colors.get(pred_val, (255, 255, 255)))
-    surface.blit(label_text, (10, y_offset + 88))
+    surface.blit(label_text, (10, y_offset + 110))
+
+    # 錯誤訊息
+    err = eeg_input.reader.get_error()
+    if err:
+        err_text = font.render(f"Error: {err[:40]}", True, (255, 0, 0))
+        surface.blit(err_text, (10, y_offset + 132))
 
 
 if __name__ == "__main__":
@@ -124,6 +151,7 @@ if __name__ == "__main__":
     print("  Relax  → swing!")
     print("=" * 50)
 
+    # === 開始畫面 ===
     while not game_start:
         screen.fill((255, 255, 255))
 
@@ -141,17 +169,25 @@ if __name__ == "__main__":
 
         game_manager.blit_start(screen)
 
-        # 在開始畫面顯示模式
         mode_font = pygame.font.SysFont('Comic Sans MS', 18)
         mode_text = mode_font.render("Mode: EEG Brain Control", True, (100, 100, 100))
         screen.blit(mode_text, (config.screen_size[0] // 2 - 100,
                                 config.screen_size[1] // 2 + 30))
 
         pygame.display.flip()
+        clock.tick(60)  # 限制開始畫面的幀率
+
+    # === 進入遊戲：啟動 EEG 讀取並同步 ===
+    eeg_input.start()
+    # 等待一小段時間讓 Serial 連線穩定
+    pygame.time.wait(500)
+    # 同步預測索引 → 丟棄啟動期間的雜訊預測
+    eeg_input.sync()
 
     game_manager.current_level.init()
     carts = game_manager.current_level.carts
 
+    # === 遊戲主迴圈 ===
     while not game_end:
         screen.fill(game_manager.current_level.background_color)
         dt = clock.tick(140) / 1000.0  # 轉為秒
@@ -190,10 +226,10 @@ if __name__ == "__main__":
 
         # --- 每幀更新：方向旋轉 ---
         if ball.not_moving() and not aim_locked:
-            aim_angle += AIM_SPEED * dt  # 方向持續旋轉
+            aim_angle += AIM_SPEED * dt
 
         # --- 物理更新 ---
-        ball.move(dt * 10)  # 乘以 10 還原原始時間尺度 (原本 tick/100)
+        ball.move(dt * 10)
         time_line = Line(ball.pos, ball.pos + ball.vel * dt * 10)
 
         i, j = pixels_2_indexes(*ball.pos)
@@ -223,16 +259,13 @@ if __name__ == "__main__":
             direction = Vector2(math.cos(aim_angle), math.sin(aim_angle))
 
             if charging:
-                # 蓄力中：箭頭隨蓄力由短變長
                 arrow_len = MIN_ARROW_LEN + (MAX_ARROW_LEN - MIN_ARROW_LEN) * charge_power
                 end_point = ball.pos + direction * arrow_len
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
             elif aim_locked:
-                # 方向已鎖定，等待蓄力
                 end_point = ball.pos + direction * MIN_ARROW_LEN
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
             else:
-                # 方向旋轉中
                 end_point = ball.pos + direction * MIN_ARROW_LEN
                 draw_arrow(screen, (255, 0, 0), ball.pos, end_point, head_size=20, width=7)
 
