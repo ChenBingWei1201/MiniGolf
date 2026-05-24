@@ -102,10 +102,16 @@ def draw_eeg_status(surface):
     text_surf = font.render(conn_text, True, conn_color)
     surface.blit(text_surf, (10, y_offset))
 
-    # Buffer 填充度
-    fill = eeg_input.reader.get_buffer_fill()
-    fill_text = font.render(f"Buffer: {fill*100:.0f}%", True, (180, 180, 180))
-    surface.blit(fill_text, (10, y_offset + 22))
+    # 校準狀態 / Buffer
+    if eeg_input.reader.is_calibrating():
+        cal_text = font.render("Blink: Calibrating...", True, (255, 200, 50))
+        surface.blit(cal_text, (10, y_offset + 22))
+    else:
+        threshold = eeg_input.reader._blink_detector.threshold
+        fill = eeg_input.reader.get_buffer_fill()
+        info_text = font.render(f"Blink threshold: {threshold:.0f} | Buffer: {fill*100:.0f}%",
+                                True, (180, 180, 180))
+        surface.blit(info_text, (10, y_offset + 22))
 
     # 目前狀態
     state = eeg_input.state_manager.current_state
