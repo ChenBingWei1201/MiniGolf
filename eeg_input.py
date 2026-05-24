@@ -382,6 +382,8 @@ class BCIStateManager:
         # 眨眼需 2 次（即使振幅偵測較準，仍保留防誤觸發）
         self.blink_threshold: int = 2
         self.blink_counter: int = 0
+        self._preds_since_last_blink: int = 0  # 距離上次 Blink 經過幾個 ML 預測
+        self._blink_timeout: int = 20  # 超過 20 個 ML 預測（~5 秒）沒 Blink 就重置計數
 
         # 放鬆需連續 3 次 ML 預測
         self.relax_threshold: int = 3
@@ -393,18 +395,36 @@ class BCIStateManager:
         self.min_swing_power: float = 10.0
 
     def update(self, raw_prediction: int) -> Tuple[GameState, float, bool]:
+        """
+        Blink 事件和 ML 預測（Focus/Relax）分開處理，互不干擾：
+        - Blink：只影響 blink_counter，不影響 relax_counter
+        - Focus/Relax：只影響 power 和 relax_counter，不影響 blink_counter
+        """
         trigger_swing = False
 
-        if self.current_state == GameState.AIMING:
-            if raw_prediction == BCISignal.BLINK:
+        # ========== Blink 事件處理 ==========
+        if raw_prediction == BCISignal.BLINK:
+            if self.current_state == GameState.AIMING:
                 self.blink_counter += 1
+                self._preds_since_last_blink = 0
+                print(f"[BCI] Blink #{self.blink_counter}/{self.blink_threshold}")
                 if self.blink_counter >= self.blink_threshold:
                     self.current_state = GameState.CHARGING
                     self.blink_counter = 0
-                    print("[BCI] AIMING -> CHARGING (Blink!)")
-            else:
+                    print("[BCI] AIMING -> CHARGING (Blink confirmed!)")
+            # Blink 不影響 CHARGING 狀態的 relax_counter
+            return self.current_state, self.power, trigger_swing
+
+        # ========== ML 預測處理（Focus / Relax）==========
+
+        # 更新 blink 超時計數
+        if self.current_state == GameState.AIMING:
+            self._preds_since_last_blink += 1
+            if self.blink_counter > 0 and self._preds_since_last_blink >= self._blink_timeout:
+                print(f"[BCI] Blink counter timeout, reset ({self.blink_counter} -> 0)")
                 self.blink_counter = 0
 
+        # CHARGING 狀態：處理蓄力與揮桿
         elif self.current_state == GameState.CHARGING:
             if raw_prediction == BCISignal.FOCUS:
                 self.power = min(self.power + self.power_increment,
@@ -420,10 +440,6 @@ class BCIStateManager:
                     self.relax_counter = 0
                     print(f"[BCI] CHARGING -> FLYING (Swing! power={self.power:.1f})")
 
-            else:
-                # Blink during charging → 重置放鬆計數但不影響蓄力
-                self.relax_counter = 0
-
         return self.current_state, self.power, trigger_swing
 
     def reset_round(self) -> None:
@@ -431,6 +447,7 @@ class BCIStateManager:
         self.power = 0.0
         self.blink_counter = 0
         self.relax_counter = 0
+        self._preds_since_last_blink = 0
 
 
 # ============================================================
