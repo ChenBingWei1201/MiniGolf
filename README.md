@@ -24,11 +24,11 @@
 | 步驟 | 腦波狀態 | 說明 |
 |------|----------|----- |
 | 瞄準 | — | 紅色箭頭自動旋轉 |
-| 鎖定方向 | 連續眨眼 ×2 | 防誤觸發，需連續偵測到 2 次眨眼 |
-| 蓄力 | 持續專注 | 每次偵測到專注，力道 +2（最高 100） |
-| 揮桿 | 持續放鬆 ×3 | 連續 3 次放鬆且力道 > 10 才觸發 |
+| 鎖定方向 | 眨眼 ×1 | 利用原始振幅瞬間偵測眨眼 |
+| 蓄力 | 持續專注 | 每次偵測到專注，力道 +1（最高 100） |
+| 揮桿 | 放鬆或振幅驟降 | 結合 ML 預測與 <1秒 的振幅快篩，達成瞬間揮桿 |
 
-EEG 模型約每 0.5 秒做一次預測（5 秒滑動窗口、512 Hz 取樣率）。
+EEG 模型約每 0.25 秒做一次預測（5 秒滑動窗口、512 Hz 取樣率）。
 
 ## 專案結構
 
@@ -71,8 +71,8 @@ MiniGolf/
 ### `eeg_input.py`
 EEG 輸入抽象層，包含三個核心元件：
 
-- **`EEGSerialReader`**（`threading.Thread`）：背景 thread 連接 BrainLink Serial，解析 `0xAA 0xAA` 封包，維護 5 秒滑動窗口，每 0.5 秒做特徵提取 + 模型預測
-- **`BCIStateManager`**：狀態機，將連續預測序列轉為遊戲動作（AIMING → CHARGING → FLYING），含防誤觸發機制
+- **`EEGSerialReader`**（`threading.Thread`）：背景 thread 連接 BrainLink Serial，解析 `0xAA 0xAA` 封包，維護 5 秒滑動窗口，每 0.25 秒做特徵提取 + 模型預測
+- **`BCIStateManager`**：狀態機，將連續預測序列轉為遊戲動作（AIMING → CHARGING → FLYING），包含雙視窗攔截機制與防誤觸發
 - **`EEGInput`**：統一介面，`update()` 回傳 `(state, power_ratio, trigger_swing)` 供遊戲主迴圈使用
 
 ### `train.py`

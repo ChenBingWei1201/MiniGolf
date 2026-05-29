@@ -1,10 +1,10 @@
 """
-EEG Input Abstraction Layer for MiniGolf (v2 — Hybrid Detection)
+EEG Input Abstraction Layer for MiniGolf (v2 - Hybrid Detection)
 ================================================================
-改進架構：
-- 眨眼：用原始訊號振幅偵測（~100ms 延遲，非常準確）
-- 專注/放鬆：用 ML 模型分類（忽略模型的 Blink 輸出）
-- 預測頻率：每 0.25 秒一次（原本 0.5 秒）
+Architecture Improvements:
+- Blink: Detected via raw signal amplitude (~100ms delay, highly accurate)
+- Focus/Relax: Classified using ML model
+- Prediction frequency: Every 0.25 seconds
 
 Usage:
     eeg = EEGInput(com_port="COM3")
@@ -49,33 +49,33 @@ class BCISignal(IntEnum):
 
 
 # ============================================================
-# BlinkDetector — 振幅即時眨眼偵測
+# BlinkDetector - Real-time amplitude-based blink detection
 # ============================================================
 
 class BlinkDetector:
     """
-    用原始 EEG 訊號的振幅（peak-to-peak）偵測眨眼。
-    眨眼會在 EEG 中產生非常明顯的大振幅人工偽影（artifact），
-    比 ML 分類器更快、更準確。
+    Detect blinks using raw EEG signal amplitude (peak-to-peak).
+    Blinks create large amplitude artifacts in EEG, which are faster and more
+    accurate to detect directly than via the ML classifier.
 
-    原理：
-    - 監測 0.3 秒滑動窗口的 peak-to-peak 振幅
-    - 超過門檻 → 判定為眨眼
-    - 冷卻期 1 秒 → 防止連續誤觸發
+    Mechanism:
+    - Monitor peak-to-peak amplitude in a 0.3s sliding window
+    - If it exceeds threshold -> detected as Blink
+    - Cooldown period 1.5s -> prevent consecutive false triggers
 
-    自動校準：
-    - 前 3 秒為校準期，計算基線振幅
-    - 門檻 = 基線 × 倍率（預設 3 倍）
+    Auto-calibration:
+    - First 3 seconds are used to calculate the baseline amplitude
+    - Threshold = Baseline * Multiplier (default 4.0)
     """
 
     def __init__(self, sampling_rate: int = 512,
                  window_sec: float = 0.3,
-                 cooldown_sec: float = 1.0,
+                 cooldown_sec: float = 1.5,
                  calibration_sec: float = 3.0,
-                 threshold_multiplier: float = 3.0,
+                 threshold_multiplier: float = 4.0,
                  min_threshold: float = 300,
-                 max_threshold: float = 2000,
-                 fallback_threshold: float = 600):
+                 max_threshold: float = 4000,
+                 fallback_threshold: float = 800):
         self.sampling_rate = sampling_rate
         self.window_size = max(1, int(sampling_rate * window_sec))
         self.cooldown_samples = int(sampling_rate * cooldown_sec)
@@ -88,38 +88,48 @@ class BlinkDetector:
         self._cooldown_counter: int = 0
         self._total_samples: int = 0
 
-        # 校準
+        # Calibration
         self._calibrating: bool = True
         self._calibration_ptps: List[float] = []
         self.threshold: float = fallback_threshold
         self._check_every: int = max(1, self.window_size // 3)
 
+        # External toggle: pause detection (e.g., when CHARGING)
+        self.enabled: bool = True
+
     def add_sample(self, raw_value: int) -> bool:
-        """加入一個原始 EEG 樣本，回傳是否偵測到眨眼。"""
+        """Add a raw EEG sample, returns True if blink detected."""
         self._buffer.append(raw_value)
         self._total_samples += 1
 
+        # Cooldown: decrements even if enabled=False
         if self._cooldown_counter > 0:
             self._cooldown_counter -= 1
-            return False
 
         if len(self._buffer) < self.window_size:
             return False
 
-        # 不要每個 sample 都算，每 ~100ms 算一次
+        # Check periodically (~100ms) to save CPU
         if self._total_samples % self._check_every != 0:
             return False
 
         ptp = max(self._buffer) - min(self._buffer)
 
-        # 校準期：收集基線 ptp
+        # Calibration phase: must run to collect baseline ptps
         if self._calibrating:
             self._calibration_ptps.append(ptp)
             if self._total_samples >= self.calibration_samples:
                 self._finish_calibration()
             return False
 
-        # 正式偵測
+        # Skip detection if paused
+        if not self.enabled:
+            return False
+
+        if self._cooldown_counter > 0:
+            return False
+
+        # Detection
         if ptp > self.threshold:
             self._cooldown_counter = self.cooldown_samples
             print(f"[BLINK] Detected! ptp={ptp:.0f} > threshold={self.threshold:.0f}")
@@ -128,13 +138,15 @@ class BlinkDetector:
         return False
 
     def _finish_calibration(self):
-        """完成校準，設定門檻"""
+        """Complete calibration and set threshold"""
         if self._calibration_ptps:
-            baseline = float(np.median(self._calibration_ptps))
-            self.threshold = baseline * self.threshold_multiplier
+            self.baseline_ptp = float(np.median(self._calibration_ptps))
+            self.threshold = self.baseline_ptp * self.threshold_multiplier
             self.threshold = max(self.min_threshold, min(self.max_threshold, self.threshold))
-            print(f"[BLINK] Calibration done. baseline_ptp={baseline:.0f}, "
+            print(f"[BLINK] Calibration done. baseline_ptp={self.baseline_ptp:.0f}, "
                   f"threshold={self.threshold:.0f}")
+        else:
+            self.baseline_ptp = 1000.0  # fallback
         self._calibrating = False
 
     @property
@@ -143,21 +155,20 @@ class BlinkDetector:
 
 
 # ============================================================
-# EEGSerialReader — 背景 Thread
+# EEGSerialReader - Background Thread
 # ============================================================
 
 class EEGSerialReader(threading.Thread):
     """
-    背景 thread：
-    1. 讀取 BrainLink Serial 原始腦波
-    2. 振幅偵測眨眼（即時）
-    3. ML 模型分類專注/放鬆（每 0.25 秒）
-    4. 合併結果到統一的預測串流
+    Background thread for:
+    1. Reading raw EEG data from Serial
+    2. Real-time amplitude blink detection
+    3. Rolling window ML predictions for Focus/Relax
     """
 
     SAMPLING_RATE = 512
-    WINDOW_SIZE = 5 * SAMPLING_RATE        # ML 模型窗口 5 秒
-    STEP_SEC = 0.25                        # 每 0.25 秒預測一次
+    WINDOW_SIZE = 5 * SAMPLING_RATE  # Restore 5s window for 88.5% ML accuracy
+    STEP_SEC = 0.25
     STEP_SIZE = int(SAMPLING_RATE * STEP_SEC)
 
     def __init__(self, com_port: str, baud_rate: int = 9600,
@@ -182,9 +193,8 @@ class EEGSerialReader(threading.Thread):
         self._running = False
         self._connected = False
         self._error_message: Optional[str] = None
-        self._last_ml_pred: int = BCISignal.RELAX
 
-    # --- Thread-safe 讀取方法 ---
+    # --- Thread-safe getters ---
 
     def get_predictions_since(self, index: int) -> list:
         with self._lock:
@@ -213,13 +223,21 @@ class EEGSerialReader(threading.Thread):
     def is_calibrating(self) -> bool:
         return self._blink_detector.is_calibrating
 
+    def is_ready(self) -> bool:
+        """Returns True if EEG is connected and calibration is finished."""
+        return self._connected and not self._blink_detector.is_calibrating
+
+    def set_blink_detection(self, enabled: bool) -> None:
+        """Enable/disable blink detection (e.g., disable during CHARGING to prevent false triggers)"""
+        self._blink_detector.enabled = enabled
+
     def stop(self):
         self._running = False
 
-    # --- 特徵提取 + 預測 ---
+    # --- Feature Extraction + Prediction ---
 
     def _extract_features(self, seg: np.ndarray) -> np.ndarray:
-        """提取 8 個特徵（與 train.py 完全一致）"""
+        """Extract 8 features (identical to train.py)"""
         seg_filtered = sosfiltfilt(self._sos, seg)
         var = np.var(seg_filtered)
         ptp = float(np.max(seg_filtered) - np.min(seg_filtered))
@@ -240,36 +258,29 @@ class EEGSerialReader(threading.Thread):
             alpha / beta if beta != 0 else 0.0
         ])
 
-    def _predict_focus_relax(self, features: np.ndarray) -> Tuple[int, float]:
-        """
-        用 ML 模型預測，但只取 Focus/Relax（忽略 Blink 輸出）。
-        使用 predict_proba 取得信心度。
-
-        Returns:
-            (prediction, confidence)
-        """
+    def _predict_focus_relax(self, features: np.ndarray) -> Tuple[int, float, float]:
+        """Returns (prediction, relax_p, blink_p).
+        Model classes: Relax=low amplitude, Focus=mid, Blink=high amplitude.
+        User's concentration also produces high amplitude (muscle artifacts),
+        so blink_p > 0.5 effectively means high mental/physical arousal = FOCUS."""
         features = features.reshape(1, -1)
         scaled = self._scaler.transform(features)
         selected = self._feature_selector.transform(scaled)
-
         probas = self._model.predict_proba(selected)[0]
-        # probas: [Relax概率, Focus概率, Blink概率]
+        relax_p = float(probas[0])
+        blink_p = float(probas[2])
 
-        # 只看 Relax(0) vs Focus(1)，忽略 Blink(2)
-        relax_p = probas[0]
-        focus_p = probas[1]
-        total = relax_p + focus_p
+        # High amplitude (muscle artifacts during concentration) → Focus
+        if blink_p > 0.5:
+            return BCISignal.FOCUS, relax_p, blink_p
 
-        if total > 0:
-            relax_p /= total
-            focus_p /= total
+        # Low amplitude, calm EEG → Relax
+        if relax_p >= 0.10:
+            return BCISignal.RELAX, relax_p, blink_p
 
-        if focus_p > relax_p:
-            return BCISignal.FOCUS, focus_p
-        else:
-            return BCISignal.RELAX, relax_p
+        return BCISignal.FOCUS, relax_p, blink_p
 
-    # --- Thread 主迴圈 ---
+    # --- Thread Main Loop ---
 
     def run(self):
         self._running = True
@@ -286,9 +297,8 @@ class EEGSerialReader(threading.Thread):
 
         try:
             while self._running:
-                # --- 批次讀取 Serial 封包 ---
                 packets_read = 0
-                while ser.in_waiting >= 7 and packets_read < 200:
+                while ser.in_waiting >= 7 and packets_read < 50:
                     b1 = ser.read(1)
                     if b1 != b'\xaa':
                         continue
@@ -304,8 +314,6 @@ class EEGSerialReader(threading.Thread):
                             raw = int.from_bytes(bs, byteorder='big', signed=True)
                             self._buffer.append(raw)
                             packets_read += 1
-
-                            # --- 即時眨眼偵測 ---
                             if self._blink_detector.add_sample(raw):
                                 with self._lock:
                                     self._predictions.append(BCISignal.BLINK)
@@ -315,26 +323,35 @@ class EEGSerialReader(threading.Thread):
                         if remaining > 0:
                             ser.read(remaining)
 
-                # --- ML 模型預測（Focus/Relax）---
                 if len(self._buffer) >= self.WINDOW_SIZE:
                     try:
                         buf_list = list(self._buffer)
                         signals = np.array(buf_list[-self.WINDOW_SIZE:], dtype=np.float64)
                         features = self._extract_features(signals)
-                        pred, confidence = self._predict_focus_relax(features)
+                        pred, relax_p, blink_p = self._predict_focus_relax(features)
 
-                        # 信心度 > 55% 才採用，否則沿用上一次的預測
-                        if confidence >= 0.55:
-                            self._last_ml_pred = pred
+                        # Dual-Window Override: Fast Relaxation Detection
+                        # If the 5s ML model still outputs FOCUS (due to old artifacts)
+                        # but the last 1 second of signal is extremely calm, force RELAX.
+                        override_msg = ""
+                        if pred == BCISignal.FOCUS and not self._blink_detector.is_calibrating:
+                            short_window = int(1.0 * self.SAMPLING_RATE)
+                            if len(self._buffer) >= short_window:
+                                short_seg = list(self._buffer)[-short_window:]
+                                short_ptp = max(short_seg) - min(short_seg)
+                                baseline = getattr(self._blink_detector, 'baseline_ptp', 1000.0)
+                                # If short-term amplitude is close to relaxed baseline (<= 1.5x)
+                                if short_ptp <= baseline * 1.5:
+                                    pred = BCISignal.RELAX
+                                    override_msg = f" [Fast Override: ptp={short_ptp:.0f} <= {baseline*1.5:.0f}]"
 
                         with self._lock:
-                            self._predictions.append(self._last_ml_pred)
+                            self._predictions.append(pred)
 
                         count = len(self._predictions)
-                        label = ["Relax", "Focus", "Blink"][self._last_ml_pred]
-                        print(f"[ML] #{count}: {label} (conf={confidence:.0%})")
+                        label = ["Relax", "Focus"][pred]
+                        print(f"[ML] #{count}: {label} (r={relax_p:.0%} b={blink_p:.0%}){override_msg}")
 
-                        # 滑動窗口
                         keep = self.WINDOW_SIZE - self.STEP_SIZE
                         while len(self._buffer) > keep:
                             self._buffer.popleft()
@@ -379,79 +396,66 @@ class BCIStateManager:
         self.current_state: GameState = GameState.AIMING
         self.power: float = 0.0
 
-        # 眨眼需 2 次（即使振幅偵測較準，仍保留防誤觸發）
-        self.blink_threshold: int = 2
+        self.blink_threshold: int = 1
         self.blink_counter: int = 0
-        self._preds_since_last_blink: int = 0  # 距離上次 Blink 經過幾個 ML 預測
-        self._blink_timeout: int = 20  # 超過 20 個 ML 預測（~5 秒）沒 Blink 就重置計數
+        self._preds_since_last_blink: int = 0
+        self._blink_timeout: int = 20
 
-        # 放鬆需連續 3 次 ML 預測
-        self.relax_threshold: int = 3
+        # Need 5 consecutive Relax predictions (~1.25s) to swing.
+        # This filters out brief noisy Relax readings without a voting buffer.
+        self.relax_threshold: int = 5
         self.relax_counter: int = 0
 
-        # 蓄力參數
-        self.power_increment: float = 2.0
+        self.power_increment: float = 1.0
         self.max_power: float = 100.0
         self.min_swing_power: float = 10.0
 
-    def update(self, raw_prediction: int) -> Tuple[GameState, float, bool]:
-        """
-        Blink 事件和 ML 預測（Focus/Relax）分開處理，互不干擾：
-        - Blink：只影響 blink_counter，不影響 relax_counter
-        - Focus/Relax：只影響 power 和 relax_counter，不影響 blink_counter
-        """
+    def update(self, raw_prediction: int, reader: 'EEGSerialReader') -> Tuple[GameState, float, bool]:
         trigger_swing = False
 
-        # ========== Blink 事件處理 ==========
         if raw_prediction == BCISignal.BLINK:
             if self.current_state == GameState.AIMING:
                 self.blink_counter += 1
                 self._preds_since_last_blink = 0
-                print(f"[BCI] Blink #{self.blink_counter}/{self.blink_threshold}")
                 if self.blink_counter >= self.blink_threshold:
                     self.current_state = GameState.CHARGING
                     self.blink_counter = 0
-                    print("[BCI] AIMING -> CHARGING (Blink confirmed!)")
-            # Blink 不影響 CHARGING 狀態的 relax_counter
+                    reader.set_blink_detection(False)
+                    print("[BCI] AIMING -> CHARGING")
             return self.current_state, self.power, trigger_swing
 
-        # ========== ML 預測處理（Focus / Relax）==========
-
-        # 更新 blink 超時計數
         if self.current_state == GameState.AIMING:
             self._preds_since_last_blink += 1
             if self.blink_counter > 0 and self._preds_since_last_blink >= self._blink_timeout:
-                print(f"[BCI] Blink counter timeout, reset ({self.blink_counter} -> 0)")
                 self.blink_counter = 0
 
-        # CHARGING 狀態：處理蓄力與揮桿
         elif self.current_state == GameState.CHARGING:
             if raw_prediction == BCISignal.FOCUS:
-                self.power = min(self.power + self.power_increment,
-                                 self.max_power)
                 self.relax_counter = 0
-
+                self.power = min(self.power + self.power_increment, self.max_power)
             elif raw_prediction == BCISignal.RELAX:
                 self.relax_counter += 1
-                if (self.relax_counter >= self.relax_threshold
-                        and self.power > self.min_swing_power):
+                if self.relax_counter >= self.relax_threshold and self.power > self.min_swing_power:
                     self.current_state = GameState.FLYING
                     trigger_swing = True
                     self.relax_counter = 0
-                    print(f"[BCI] CHARGING -> FLYING (Swing! power={self.power:.1f})")
+                    reader.set_blink_detection(True)
+                    print(f"[BCI] CHARGING -> FLYING (power={self.power:.0f})")
 
         return self.current_state, self.power, trigger_swing
 
-    def reset_round(self) -> None:
+    def reset_round(self, reader: Optional['EEGSerialReader'] = None) -> None:
         self.current_state = GameState.AIMING
         self.power = 0.0
         self.blink_counter = 0
         self.relax_counter = 0
         self._preds_since_last_blink = 0
+        if reader is not None:
+            reader.set_blink_detection(True)
 
 
 # ============================================================
-# EEGInput — 統一介面
+# EEGInput Main API
 # ============================================================
 
 class EEGInput:
@@ -494,7 +498,7 @@ class EEGInput:
         if new_preds:
             self._last_pred_index += len(new_preds)
             for pred in new_preds:
-                _, _, swung = self.state_manager.update(pred)
+                _, _, swung = self.state_manager.update(pred, self.reader)
                 if swung:
                     trigger_swing = True
 
@@ -504,10 +508,14 @@ class EEGInput:
         return state, power_ratio, trigger_swing
 
     def reset_round(self) -> None:
-        self.state_manager.reset_round()
+        self.state_manager.reset_round(self.reader)
 
     def is_connected(self) -> bool:
         return self.reader.is_connected()
+
+    def is_ready(self) -> bool:
+        """Returns True if EEG is connected and calibration is finished."""
+        return self.reader.is_ready()
 
     def close(self) -> None:
         self.reader.stop()
