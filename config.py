@@ -1,5 +1,7 @@
 screen_size = (1440, 960)
 
+window_size = (960, 640)
+
 ball_radius = 10
 
 cell_size = 16
