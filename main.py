@@ -346,7 +346,7 @@ if __name__ == "__main__":
         flip_display()
 
         if physics.point_in_circle(hole, ball.pos):
-            ball.vel += (hole.pos - ball.pos)
+            ball.vel = (hole.pos - ball.pos)
 
         if game_manager.ball_in_hole(ball, hole):
             carts, is_end = game_manager.new_level(ball, hole)
