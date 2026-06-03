@@ -1,23 +1,10 @@
 # EEG MiniGolf
 
-基於 Pygame 的迷你高爾夫遊戲，最終目標是整合穿戴式 EEG 感測裝置，透過 **眨眼**、**專注**、**放鬆** 三種腦波狀態操控遊戲。支援 EEG 腦波控制與鍵盤/滑鼠雙模式。
+基於 Pygame 的迷你高爾夫遊戲，最終目標是整合穿戴式 EEG 感測裝置，透過 **眨眼**、**專注**、**放鬆** 三種腦波狀態操控遊戲。
 
 [![demo](https://img.youtube.com/vi/mGCUsP0w5WU/0.jpg)](https://www.youtube.com/watch?v=mGCUsP0w5WU)
 
 ## 操作方式
-
-### 鍵盤/滑鼠模式（預設）
-
-| 步驟 | 操作 | 模擬的 EEG 狀態 |
-|------|------|-----------------| 
-| 瞄準 | 球靜止時，紅色箭頭自動旋轉 | — |
-| 鎖定方向 | 滑鼠點擊 | 眨眼 |
-| 蓄力 | 按住空白鍵（箭頭由短變長） | 專注 |
-| 揮桿 | 放開空白鍵 | 放鬆 |
-
-力道與按住空白鍵的時長成正比，對應未來 EEG 的專注持續時間。
-
-### EEG 腦波控制模式
 
 使用 BrainLink 穿戴式 EEG 裝置，透過真實腦波操控遊戲：
 
@@ -26,7 +13,7 @@
 | 瞄準 | — | 紅色箭頭自動旋轉 |
 | 鎖定方向 | 眨眼 ×1 | 利用原始振幅瞬間偵測眨眼 |
 | 蓄力 | 持續專注 | 每次偵測到專注，力道 +1（最高 100） |
-| 揮桿 | 放鬆或振幅驟降 | 結合 ML 預測與 <1秒 的振幅快篩，達成瞬間揮桿 |
+| 揮桿 | 放鬆或振幅驟降 | 結合 ML 預測與 < 1 秒的振幅快篩，達成瞬間揮桿 |
 
 EEG 模型約每 0.25 秒做一次預測（5 秒滑動窗口、512 Hz 取樣率）。
 
@@ -34,7 +21,7 @@ EEG 模型約每 0.25 秒做一次預測（5 秒滑動窗口、512 Hz 取樣率�
 
 ```
 MiniGolf/
-├── main.py              # 遊戲主迴圈、輸入處理、繪圖（支援雙模式）
+├── main.py              # 遊戲主迴圈、輸入處理、繪圖
 ├── eeg_input.py         # EEG 輸入抽象層（Serial reader + 狀態機 + 模型預測）
 ├── game_manager.py      # 關卡切換、生命值、計分、UI 文字
 ├── game_objects.py      # Ball / Hole / Wall / Cart 遊戲物件
@@ -48,8 +35,6 @@ MiniGolf/
 ├── sprite_sheet.py      # Sprite sheet 切圖 + Type 列舉
 ├── transformation.py    # 格子索引 ↔ 像素座標轉換
 ├── train.py             # EEG MLP 分類器訓練（離線，產生 .pkl 模型檔）
-├── realtime.py          # EEG 即時讀取 + 預測（獨立測試用）
-├── integrating_classifier_output_with_games.py  # BCI 狀態機原型（已整合至 eeg_input.py）
 └── images/              # ball_golf.png / heart.png / sheet_map.png
 ```
 
@@ -58,15 +43,11 @@ MiniGolf/
 ### `main.py`
 遊戲入口，包含三階段迴圈：開始畫面 → 遊戲主迴圈 → 結束畫面。
 
-支援雙模式：
-- **鍵盤/滑鼠模式（預設）**：滑鼠點擊鎖定方向、空白鍵蓄力放開揮桿
-- **EEG 模式（`--eeg` 參數啟動）**：從 EEG 背景 thread 讀取預測，經狀態機轉為遊戲操控
-
 輸入處理流程：
 1. 球靜止時箭頭自動旋轉（`aim_angle += AIM_SPEED * dt`）
-2. 鎖定方向（滑鼠點擊 / EEG 眨眼）
-3. 蓄力（空白鍵按住 / EEG 持續專注）
-4. 揮桿（空白鍵放開 / EEG 連續放鬆）
+2. 鎖定方向（EEG 眨眼）
+3. 蓄力（EEG 持續專注）
+4. 揮桿（EEG 連續放鬆）
 
 ### `eeg_input.py`
 EEG 輸入抽象層，包含三個核心元件：
@@ -109,18 +90,12 @@ cd MiniGolf
 uv sync
 ```
 
-### 鍵盤/滑鼠模式
-```bash
-uv run python main.py
-```
-
-### EEG 腦波控制模式
 ```bash
 # 1. 先訓練模型（需要 bci_dataset_114-2_any/ 資料夾）
-uv run python train.py
+uv run train.py
 
-# 2. 啟動 EEG 模式（替換 COM3 為你的裝置 port）
-uv run python main.py --eeg --port COM3
+# 2. 啟動 EEG 模式（替換 COM9 為你的裝置 port）
+uv run main.py --eeg --port COM9
 ```
 
 **環境需求：** Python ≥ 3.13、pygame ≥ 2.6.1、numpy ≥ 2.4.4、scikit-learn ≥ 1.6.0、scipy ≥ 1.15.0、joblib ≥ 1.5.0、pyserial ≥ 3.5
